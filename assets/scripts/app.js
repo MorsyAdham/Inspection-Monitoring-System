@@ -114,39 +114,20 @@ function saveFileToLocalStorage(key) {
     console.warn('localStorage save failed', e);
   }
 }
-// function loadFileFromLocalStorage(key) {
-//   try {
-//     const raw = localStorage.getItem(`inspection_${key}`);
-//     if (!raw) return false;
-//     const parsed = JSON.parse(raw);
-//     if (Array.isArray(parsed)) {
-//       files[key].rows = parsed;
-//       return true;
-//     }
-//     return false;
-//   } catch (e) {
-//     return false;
-//   }
-// }
-
-async function loadDataFromFirebase() {
-  const snapshot = await db.collection("shipment_data").get();
-  const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-  files["main"] = {
-    name: "cloud_data",
-    rows,
-    columns: EXPECTED_COLS
-  };
-
-  db.collection("shipment_data")
-    .doc(rows.id)
-    .update({ [columnName]: newValue });
-
-  db.collection("shipment_data").add(newRow);
-
-  setActiveFile("main");
+function loadFileFromLocalStorage(key) {
+  try {
+    const raw = localStorage.getItem(`inspection_${key}`);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      files[key].rows = parsed;
+      return true;
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
 }
-
 
 // ---------------------- File loading ----------------------
 
@@ -274,9 +255,7 @@ function addWorkbook(key, name, workbook) {
   filesSelect.appendChild(opt);
 
   // load autosaved edits (if present)
-  // loadFileFromLocalStorage(key);
-  loadDataFromFirebase();
-
+  loadFileFromLocalStorage(key);
 
   // if first file, activate it
   if (!activeKey) setActiveFile(key);
@@ -566,39 +545,92 @@ function renderCharts(rows) {
 function exportWorkbookWithAnalytics(key) {
   const entry = files[key];
   if (!entry) return;
-  // Data sheet
+
+  // -----------------------------
+  // 1) MAIN DATA SHEET (unchanged)
+  // -----------------------------
   const dataRows = entry.rows.map(r => {
     const out = {};
     EXPECTED_COLS.forEach(c => out[c] = r[c] ?? '');
-    Object.keys(r).forEach(k => { if (!EXPECTED_COLS.includes(k)) out[k] = r[k]; });
+    Object.keys(r).forEach(k => {
+      if (!EXPECTED_COLS.includes(k)) out[k] = r[k];
+    });
     return out;
   });
   const wsData = XLSX.utils.json_to_sheet(dataRows);
 
-  // Analytics sheet (per container)
-  const byContainer = {};
-  entry.rows.forEach(r => {
-    const cont = String(r.ContainerNum ?? 'NA');
-    if (!byContainer[cont]) byContainer[cont] = { total: 0, finished: 0, remaining: 0 };
-    byContainer[cont].total += 1;
-    if (isCompleted(r.REMARKS)) byContainer[cont].finished += 1;
-    else byContainer[cont].remaining += 1;
-  });
+  // -----------------------------
+  // 2) MAIN ANALYTICS (same as before)
+  // -----------------------------
+  function buildAnalytics(rows) {
+    const byContainer = {};
 
-  const analyticsRows = [];
-  let total = 0, totalFinished = 0, totalRemaining = 0;
-  Object.keys(byContainer).sort().forEach(cont => {
-    const v = byContainer[cont];
-    analyticsRows.push({ Container: cont, TotalBoxes: v.total, Finished: v.finished, Remaining: v.remaining, CompletionPercent: v.total === 0 ? 0 : Math.round((v.finished / v.total) * 100) });
-    total += v.total; totalFinished += v.finished; totalRemaining += v.remaining;
-  });
-  analyticsRows.push({ Container: 'ALL', TotalBoxes: total, Finished: totalFinished, Remaining: totalRemaining, CompletionPercent: total === 0 ? 0 : Math.round((totalFinished / total) * 100) });
-  const wsAnalytics = XLSX.utils.json_to_sheet(analyticsRows);
+    rows.forEach(r => {
+      const cont = String(r.ContainerNum ?? 'NA');
+      if (!byContainer[cont]) byContainer[cont] = { total: 0, finished: 0, remaining: 0 };
+      byContainer[cont].total++;
 
+      if (isCompleted(r.REMARKS)) byContainer[cont].finished++;
+      else byContainer[cont].remaining++;
+    });
+
+    let total = 0, totalFinished = 0, totalRemaining = 0;
+    const out = [];
+
+    Object.keys(byContainer).sort().forEach(cont => {
+      const v = byContainer[cont];
+      out.push({
+        Container: cont,
+        TotalBoxes: v.total,
+        Finished: v.finished,
+        Remaining: v.remaining,
+        CompletionPercent:
+          v.total === 0 ? 0 : Math.round((v.finished / v.total) * 100)
+      });
+
+      total += v.total;
+      totalFinished += v.finished;
+      totalRemaining += v.remaining;
+    });
+
+    out.push({
+      Container: 'ALL',
+      TotalBoxes: total,
+      Finished: totalFinished,
+      Remaining: totalRemaining,
+      CompletionPercent:
+        total === 0 ? 0 : Math.round((totalFinished / total) * 100)
+    });
+
+    return XLSX.utils.json_to_sheet(out);
+  }
+
+  const wsAnalytics = buildAnalytics(entry.rows);
+
+  // -----------------------------
+  // 3) FACTORY-SPLIT ANALYTICS
+  // -----------------------------
+  const factories = [...new Set(entry.rows.map(r => r.Factory || "UNKNOWN"))];
+
+  // Create workbook
   const wb = XLSX.utils.book_new();
+
+  // Data + Main Analytics
   XLSX.utils.book_append_sheet(wb, wsData, 'Data');
   XLSX.utils.book_append_sheet(wb, wsAnalytics, 'Analytics');
 
+  // For each factory, create same analytics sheet but filtered
+  factories.forEach(fac => {
+    const filtered = entry.rows.filter(r => r.Factory === fac);
+    const ws = buildAnalytics(filtered);
+
+    const safeName = `Analytics_${fac}`.replace(/[^a-zA-Z0-9_]/g, "");
+    XLSX.utils.book_append_sheet(wb, ws, safeName);
+  });
+
+  // -----------------------------
+  // 4) SAVE FILE
+  // -----------------------------
   const outName = `${entry.name.replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_\-\.]/g, '')}_${nowTimestampForName()}.xlsx`;
   XLSX.writeFile(wb, outName);
 }
@@ -608,6 +640,7 @@ exportBtn.addEventListener('click', () => {
   if (!activeKey) { alert('No active file'); return; }
   exportWorkbookWithAnalytics(activeKey);
 });
+
 
 // ---------------------- Autosave / Autoexport on unload ----------------------
 
