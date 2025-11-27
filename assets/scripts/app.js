@@ -114,20 +114,39 @@ function saveFileToLocalStorage(key) {
     console.warn('localStorage save failed', e);
   }
 }
-function loadFileFromLocalStorage(key) {
-  try {
-    const raw = localStorage.getItem(`inspection_${key}`);
-    if (!raw) return false;
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      files[key].rows = parsed;
-      return true;
-    }
-    return false;
-  } catch (e) {
-    return false;
-  }
+// function loadFileFromLocalStorage(key) {
+//   try {
+//     const raw = localStorage.getItem(`inspection_${key}`);
+//     if (!raw) return false;
+//     const parsed = JSON.parse(raw);
+//     if (Array.isArray(parsed)) {
+//       files[key].rows = parsed;
+//       return true;
+//     }
+//     return false;
+//   } catch (e) {
+//     return false;
+//   }
+// }
+
+async function loadDataFromFirebase() {
+  const snapshot = await db.collection("shipment_data").get();
+  const rows = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  files["main"] = {
+    name: "cloud_data",
+    rows,
+    columns: EXPECTED_COLS
+  };
+
+  db.collection("shipment_data")
+    .doc(rows.id)
+    .update({ [columnName]: newValue });
+
+  db.collection("shipment_data").add(newRow);
+
+  setActiveFile("main");
 }
+
 
 // ---------------------- File loading ----------------------
 
@@ -255,7 +274,9 @@ function addWorkbook(key, name, workbook) {
   filesSelect.appendChild(opt);
 
   // load autosaved edits (if present)
-  loadFileFromLocalStorage(key);
+  // loadFileFromLocalStorage(key);
+  loadDataFromFirebase();
+
 
   // if first file, activate it
   if (!activeKey) setActiveFile(key);
